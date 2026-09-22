@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MPU6050 BLE Telemetry</title>
+
+<!--
+  ============================================================================
+  MPU6050 BLE Telemetry Dashboard
+  ----------------------------------------------------------------------------
+  This page replaces the Wi-Fi/SSE dashboards from the referenced tutorials.
+  There is no server on the ESP32 here. Instead, this page uses the
+  Web Bluetooth API (navigator.bluetooth) to connect DIRECTLY to the ESP32's
+  BLE GATT service and subscribe to notifications.
+
+  Requirements:
+   - Chrome or Edge (desktop, or Android). Web Bluetooth is NOT supported
+     in Safari/iOS or Firefox.
+   - This file must be served over HTTPS, or opened from localhost.
+     Opening it as a plain local file (file://) will NOT work - Chrome
+     requires a "secure context" for Web Bluetooth. The easiest options:
+       * run a tiny local server, e.g. `python3 -m http.server` and open
+         http://localhost:8000/index.html
+       * host it on any HTTPS static site (GitHub Pages, Netlify, etc.)
+   - The UUIDs below MUST exactly match SERVICE_UUID / CHARACTERISTIC_UUID
+     in main.cpp.
+  ============================================================================
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<style>
+  :root{
+    --bg:#11151b;
+    --panel:#181d25;
+    --panel-2:#1f2530;
+    --border:#2a303b;
+    --text:#e7e9ec;
+    --muted:#8b93a0;
+    --amber:#e8a33d;
+    --teal:#57c7b8;
+    --red:#e8636b;
+    --mono:'IBM Plex Mono', ui-monospace, monospace;
+    --sans:'IBM Plex Sans', system-ui, sans-serif;
+  }
+
+  *{ box-sizing:border-box; }
+
+  html,body{
+    height:100%;
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+  }
+
+  body{
+    display:flex;
+    flex-direction:column;
+  }
+
+  header{
+    padding:18px 24px;
+    border-bottom:1px solid var(--border);
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:10px;
+  }
+
+  header h1{
+    font-size:18px;
+    font-weight:600;
+    margin:0;
+    letter-spacing:0.2px;
+  }
+
+  header .device-name{
+    color:var(--muted);
+    font-family:var(--mono);
+    font-size:13px;
+  }
+
+  main{
+    flex:1;
+    display:grid;
+    grid-template-columns:1fr 340px;
+    gap:1px;
+    background:var(--border);
+    min-height:0;
+  }
+
+  @media (max-width:820px){
+    main{ grid-template-columns:1fr; }
+  }
+
+  .stage{
+    background:var(--bg);
+    position:relative;
+    display:flex;
+    flex-direction:column;
+    min-height:420px;
+  }
+
+  #cube-canvas{
+    flex:1;
+    width:100%;
+    display:block;
+  }
+
+  .stage-footer{
+    padding:10px 18px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--muted);
+    border-top:1px solid var(--border);
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+
+  .sidebar{
+    background:var(--bg);
+    display:flex;
+    flex-direction:column;
+    overflow:auto;
+  }
+
+  .connect-block{
+    padding:20px;
+    border-bottom:1px solid var(--border);
+  }
+
+  button#connect-btn{
+    width:100%;
+    padding:12px 16px;
+    border-radius:6px;
+    border:1px solid var(--amber);
+    background:var(--amber);
+    color:#181205;
+    font-family:var(--sans);
+    font-weight:600;
+    font-size:14px;
+    cursor:pointer;
+    transition:opacity 0.15s ease;
+  }
+
+  button#connect-btn:hover{ opacity:0.9; }
+  button#connect-btn:disabled{
+    background:var(--panel-2);
+    border-color:var(--border);
+    color:var(--muted);
+    cursor:default;
+  }
+
+  .action-row{
+    display:flex;
+    gap:8px;
+    margin-top:10px;
+  }
+
+  .action-row button{
+    flex:1;
+    padding:10px 12px;
+    border-radius:6px;
+    font-family:var(--sans);
+    font-weight:600;
+    font-size:13px;
+    cursor:pointer;
+    transition:opacity 0.15s ease;
+    border:1px solid var(--border);
+    background:var(--panel-2);
+    color:var(--text);
+  }
+
+  .action-row button:hover:not(:disabled){ opacity:0.85; }
+
+  .action-row button:disabled{
+    color:var(--muted);
+    cursor:default;
+    opacity:0.5;
+  }
+
+  #start-btn.streaming{
+    border-color:var(--teal);
+    color:var(--teal);
+  }
+
+  #zero-btn{
+    border-color:var(--amber);
+    color:var(--amber);
+  }
+
+  .origin-status{
+    margin-top:10px;
+    font-size:12px;
+    font-family:var(--mono);
+    color:var(--muted);
+  }
+
+  .status-row{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-top:12px;
+    font-size:13px;
+    color:var(--muted);
+  }
+
+  .status-dot{
+    width:9px;
+    height:9px;
+    border-radius:50%;
+    background:var(--red);
+    flex-shrink:0;
+  }
+  .status-dot.connected{ background:var(--teal); }
+
+  .readout{
+    padding:20px;
+    border-bottom:1px solid var(--border);
+  }
+
+  .readout h2{
+    font-size:12px;
+    text-transform:none;
+    letter-spacing:0.3px;
+    color:var(--muted);
+    margin:0 0 12px;
+    font-weight:500;
+  }
+
+  .readout-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    gap:8px 10px;
+  }
+
+  .readout-cell{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:6px;
+    padding:8px 10px;
+  }
+
+  .readout-cell .label{
+    font-size:11px;
+    color:var(--muted);
+    font-family:var(--mono);
+  }
+
+  .readout-cell .value{
+    font-family:var(--mono);
+    font-size:15px;
+    font-weight:600;
+    margin-top:2px;
+  }
+
+  .readout-cell.accel .value{ color:var(--amber); }
+  .readout-cell.gyro .value{ color:var(--teal); }
+
+  .orientation-list{
+    padding:20px;
+    flex:1;
+  }
+
+  .orientation-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:10px 0;
+    border-bottom:1px solid var(--border);
+    font-family:var(--mono);
+    font-size:13px;
+  }
+  .orientation-row:last-child{ border-bottom:none; }
+
+  .orientation-row .value{ font-weight:600; }
+
+  .log-panel{
+    padding:14px 20px 20px;
+    border-top:1px solid var(--border);
+  }
+
+  .log-panel h2{
+    font-size:12px;
+    color:var(--muted);
+    font-weight:500;
+    margin:0 0 8px;
+  }
+
+  #log{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:var(--muted);
+    max-height:110px;
+    overflow-y:auto;
+    line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MPU6050 Telemetry <span style="color:var(--muted); font-weight:400;">/ BLE</span></h1>
+  <span class="device-name">ESP32-S3-MPU6050</span>
+</header>
+
+<main>
+  <section class="stage">
+    <canvas id="cube-canvas"></canvas>
+    <div class="stage-footer">
+      <span>roll <span id="roll-mini">0.0</span>°</span>
+      <span>pitch <span id="pitch-mini">0.0</span>°</span>
+      <span>yaw <span id="yaw-mini">0.0</span>°</span>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <div class="connect-block">
+      <button id="connect-btn">Connect over Bluetooth</button>
+      <div class="status-row">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Not connected</span>
+      </div>
+
+      <div class="action-row">
+        <button id="start-btn" disabled>Start streaming</button>
+        <button id="zero-btn" disabled>Set origin (zero)</button>
+      </div>
+      <div class="origin-status" id="origin-status">Origin: not set (using raw angles)</div>
+    </div>
+
+    <div class="readout">
+      <h2>Accelerometer (m/s²)</h2>
+      <div class="readout-grid">
+        <div class="readout-cell accel"><div class="label">X</div><div class="value" id="ax">0.00</div></div>
+        <div class="readout-cell accel"><div class="label">Y</div><div class="value" id="ay">0.00</div></div>
+        <div class="readout-cell accel"><div class="label">Z</div><div class="value" id="az">0.00</div></div>
+      </div>
+    </div>
+
+    <div class="readout">
+      <h2>Gyroscope (rad/s)</h2>
+      <div class="readout-grid">
+        <div class="readout-cell gyro"><div class="label">X</div><div class="value" id="gx">0.00</div></div>
+        <div class="readout-cell gyro"><div class="label">Y</div><div class="value" id="gy">0.00</div></div>
+        <div class="readout-cell gyro"><div class="label">Z</div><div class="value" id="gz">0.00</div></div>
+      </div>
+    </div>
+
+    <div class="orientation-list">
+      <div class="orientation-row"><span>Roll</span><span class="value" id="roll">0.0°</span></div>
+      <div class="orientation-row"><span>Pitch</span><span class="value" id="pitch">0.0°</span></div>
+      <div class="orientation-row"><span>Yaw (drifts, no magnetometer)</span><span class="value" id="yaw">0.0°</span></div>
+      <div class="orientation-row"><span>Temperature</span><span class="value" id="temp">-- °C</span></div>
+    </div>
+
+    <div class="log-panel">
+      <h2>Connection log</h2>
+      <div id="log"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ============================================================================
+// 1) BLE UUIDs - MUST match main.cpp exactly
+// ============================================================================
+const SERVICE_UUID        = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+const CHARACTERISTIC_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+
+const connectBtn   = document.getElementById('connect-btn');
+const statusDot    = document.getElementById('status-dot');
+const statusText   = document.getElementById('status-text');
+const logEl        = document.getElementById('log');
+const startBtn     = document.getElementById('start-btn');
+const zeroBtn      = document.getElementById('zero-btn');
+const originStatus = document.getElementById('origin-status');
+
+// ----------------------------------------------------------------------
+// Display gate: after a BLE connection succeeds we deliberately do NOT
+// start updating the UI/cube. Packets keep arriving in the background,
+// but nothing on screen changes until the user presses "Start streaming".
+// This gives you a moment to hold the sensor still / in the pose you want
+// before the live view kicks in.
+// ----------------------------------------------------------------------
+let isStreaming = false;
+
+// ----------------------------------------------------------------------
+// Origin (zero) calibration: whatever roll/pitch/yaw the sensor reports
+// at the moment you press "Set origin" becomes the new (0,0,0) reference.
+// Every later reading is shown relative to that offset, so you can lay
+// the sensor down in any orientation you like, call that "home", and
+// re-zero again at any time by pressing the button once more.
+// ----------------------------------------------------------------------
+let originOffset = { roll: 0, pitch: 0, yaw: 0 };
+let latestRaw    = { roll: 0, pitch: 0, yaw: 0 };
+
+// Keep an angle in the -180..180 range after subtracting the offset.
+function normalizeAngle(deg) {
+  return ((deg + 180) % 360 + 360) % 360 - 180;
+}
+
+function log(msg) {
+  const line = document.createElement('div');
+  const t = new Date().toLocaleTimeString();
+  line.textContent = `[${t}] ${msg}`;
+  logEl.prepend(line);
+}
+
+function setConnected(isConnected) {
+  statusDot.classList.toggle('connected', isConnected);
+  statusText.textContent = isConnected ? 'Connected' : 'Not connected';
+  connectBtn.textContent = isConnected ? 'Disconnect' : 'Connect over Bluetooth';
+
+  // Connecting never auto-starts the display, and disconnecting always
+  // stops it, so the view can't get out of sync with a stale reading.
+  isStreaming = false;
+  setStreamingButton();
+
+  startBtn.disabled = !isConnected;
+  zeroBtn.disabled  = !isConnected;
+
+  if (!isConnected) {
+    originOffset = { roll: 0, pitch: 0, yaw: 0 };
+    originStatus.textContent = 'Origin: not set (using raw angles)';
+  }
+}
+
+function setStreamingButton() {
+  startBtn.textContent = isStreaming ? 'Stop streaming' : 'Start streaming';
+  startBtn.classList.toggle('streaming', isStreaming);
+}
+
+let bleDevice = null;
+let bleCharacteristic = null;
+
+// ============================================================================
+// 2) Connect flow: must be triggered by a real user click (browser security
+//    requirement for both Web Bluetooth's requestDevice()).
+// ============================================================================
+async function connectBLE() {
+  if (!navigator.bluetooth) {
+    log('This browser does not support Web Bluetooth. Use Chrome or Edge.');
+    alert('Web Bluetooth is not available in this browser. Please use Chrome or Edge (desktop or Android).');
+    return;
+  }
+
+  try {
+    log('Requesting BLE device...');
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }]
+    });
+
+    bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+    log(`Connecting to ${bleDevice.name || 'device'}...`);
+    const server = await bleDevice.gatt.connect();
+
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+    await bleCharacteristic.startNotifications();
+    bleCharacteristic.addEventListener('characteristicvaluechanged', onTelemetry);
+
+    setConnected(true);
+    log('Connected and subscribed to telemetry.');
+  } catch (err) {
+    log(`Connection failed: ${err.message || err}`);
+    setConnected(false);
+  }
+}
+
+function disconnectBLE() {
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+}
+
+function onDisconnected() {
+  setConnected(false);
+  log('Device disconnected.');
+}
+
+connectBtn.addEventListener('click', () => {
+  if (bleDevice && bleDevice.gatt.connected) {
+    disconnectBLE();
+  } else {
+    connectBLE();
+  }
+});
+
+startBtn.addEventListener('click', () => {
+  isStreaming = !isStreaming;
+  setStreamingButton();
+  log(isStreaming ? 'Streaming started - readouts and cube are now live.' : 'Streaming paused.');
+});
+
+zeroBtn.addEventListener('click', () => {
+  originOffset = {
+    roll:  latestRaw.roll,
+    pitch: latestRaw.pitch,
+    yaw:   latestRaw.yaw
+  };
+  const t = new Date().toLocaleTimeString();
+  originStatus.textContent = `Origin: set at ${t} (current pose = 0,0,0)`;
+  log('Origin set from current sensor pose.');
+});
+
+// ============================================================================
+// 3) Parse the JSON packet notified by the ESP32 and update UI + 3D cube
+// ============================================================================
+function onTelemetry(event) {
+  const value = event.target.value; // DataView
+  const text = new TextDecoder().decode(value);
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    // A packet can arrive split across MTU boundaries on some platforms;
+    // in practice, with setMTU(185) on the ESP32 side this is rare for
+    // the ~150-byte payload used here. If you see parse errors often,
+    // buffer/reassemble chunks before calling JSON.parse.
+    return;
+  }
+
+  // Always remember the latest raw pose, even while streaming is paused,
+  // so "Set origin" can zero against whatever the sensor is reporting
+  // right now, and so the display can pick up mid-stream without a gap.
+  latestRaw.roll  = data.roll;
+  latestRaw.pitch = data.pitch;
+  latestRaw.yaw   = data.yaw;
+
+  // Nothing below this line touches the UI until the user presses
+  // "Start streaming" - connecting alone never changes what's on screen.
+  if (!isStreaming) return;
+
+  const roll  = normalizeAngle(data.roll  - originOffset.roll);
+  const pitch = normalizeAngle(data.pitch - originOffset.pitch);
+  const yaw   = normalizeAngle(data.yaw   - originOffset.yaw);
+
+  document.getElementById('ax').textContent = data.ax.toFixed(2);
+  document.getElementById('ay').textContent = data.ay.toFixed(2);
+  document.getElementById('az').textContent = data.az.toFixed(2);
+  document.getElementById('gx').textContent = data.gx.toFixed(2);
+  document.getElementById('gy').textContent = data.gy.toFixed(2);
+  document.getElementById('gz').textContent = data.gz.toFixed(2);
+
+  document.getElementById('roll').textContent  = roll.toFixed(1) + '°';
+  document.getElementById('pitch').textContent = pitch.toFixed(1) + '°';
+  document.getElementById('yaw').textContent   = yaw.toFixed(1) + '°';
+  document.getElementById('temp').textContent  = data.temp.toFixed(1) + ' °C';
+
+  document.getElementById('roll-mini').textContent  = roll.toFixed(1);
+  document.getElementById('pitch-mini').textContent = pitch.toFixed(1);
+  document.getElementById('yaw-mini').textContent   = yaw.toFixed(1);
+
+  applyOrientationToCube(roll, pitch, yaw);
+}
+
+// ============================================================================
+// 4) Three.js scene: a simple oriented box that mirrors the sensor's pose
+// ============================================================================
+let scene, camera, renderer, cube;
+
+function initScene() {
+  const canvas = document.getElementById('cube-canvas');
+  const stage = canvas.parentElement;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x11151b);
+
+  camera = new THREE.PerspectiveCamera(45, stage.clientWidth / stage.clientHeight, 0.1, 100);
+  camera.position.set(2.4, 1.8, 2.6);
+  camera.lookAt(0, 0, 0);
+
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(stage.clientWidth, stage.clientHeight);
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+  scene.add(ambient);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+  dir.position.set(3, 4, 2);
+  scene.add(dir);
+
+  const geometry = new THREE.BoxGeometry(1.6, 0.4, 2.4); // proportioned like a board / IMU carrier
+  const materials = [
+    new THREE.MeshStandardMaterial({ color: 0xe8a33d }), // +X
+    new THREE.MeshStandardMaterial({ color: 0xc9871f }), // -X
+    new THREE.MeshStandardMaterial({ color: 0x57c7b8 }), // +Y (top)
+    new THREE.MeshStandardMaterial({ color: 0x2a9c8f }), // -Y (bottom)
+    new THREE.MeshStandardMaterial({ color: 0x3a4250 }), // +Z
+    new THREE.MeshStandardMaterial({ color: 0x3a4250 }), // -Z
+  ];
+  cube = new THREE.Mesh(geometry, materials);
+  scene.add(cube);
+
+  const grid = new THREE.GridHelper(6, 12, 0x2a303b, 0x1f2530);
+  scene.add(grid);
+
+  window.addEventListener('resize', onResize);
+  animate();
+}
+
+function onResize() {
+  const stage = document.getElementById('cube-canvas').parentElement;
+  camera.aspect = stage.clientWidth / stage.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(stage.clientWidth, stage.clientHeight);
+}
+
+function applyOrientationToCube(rollDeg, pitchDeg, yawDeg) {
+  const toRad = Math.PI / 180;
+  cube.rotation.x = pitchDeg * toRad;
+  cube.rotation.z = -rollDeg * toRad;
+  cube.rotation.y = yawDeg * toRad;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+
+initScene();
+setConnected(false);
+log('Ready. 1) Connect over Bluetooth, 2) optionally set an origin with the sensor held in your reference pose, 3) press Start streaming.');
+</script>
+
+</body>
+</html>
